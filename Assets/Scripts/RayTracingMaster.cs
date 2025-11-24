@@ -1,12 +1,3 @@
-/*
-
-The results of ray tracing calculations (like color, intensity, etc.) are rendered to a render texture. 
-This texture acts as a canvas that captures the final image as computed by the ray tracing process. 
-Finally, the render texture is displayed on the screen or used for further processing.
-
-*/
-
-
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -16,62 +7,81 @@ public class RayTracingMaster : MonoBehaviour
     public Texture SkyboxTexture;
     public Light DirectionalLight;
 
+    [Range(0.0f, 1.0f)]
+    [Tooltip("Probability that a generated sphere will be metallic (0 = all diffuse, 1 = all metal).")]
+    public float chanceOfBeingMetalSphere = 0.5f;
+
+    private float lastChanceOfBeingMetalSphere;
+
     [Header("Spheres")]
     public Vector2 SphereRadius = new Vector2(4.0f, 10.0f);
     public uint SpheresMax = 100;
     public float SpherePlacementRadius = 100.0f;
 
-    private Camera _camera;
-    private float _lastFieldOfView;
-    private RenderTexture _target;
-    private Material _addMaterial;
-    private uint _currentSample = 0;
-    private ComputeBuffer _sphereBuffer;
-    private List<Transform> _transformsToWatch = new List<Transform>();
+    private Camera mainCamera;
+    private float lastFieldOfView;
+    private RenderTexture targetRT;
+    private Material addMaterial;
+    private uint currentSample = 0;
+    private ComputeBuffer sphereBuffer;
+    private List<Transform> trackedTransforms = new List<Transform>();
 
     struct Sphere
     {
-        public Vector3 position;
-        public float radius;
-        public Vector3 albedo;
-        public Vector3 specular;
+        public Vector3 position; // 12 bytes
+        public float radius; // 4 bytes
+        public Vector3 albedo; // 12 bytes
+        public Vector3 specular; // 12 bytes
     }
 
     private void Awake()
     {
-        _camera = GetComponent<Camera>();
-
-        _transformsToWatch.Add(transform);
-        _transformsToWatch.Add(DirectionalLight.transform);
+        mainCamera = GetComponent<Camera>();
+        trackedTransforms.Add(transform);
+        trackedTransforms.Add(DirectionalLight.transform);
     }
 
     private void OnEnable()
     {
-        _currentSample = 0;
+        currentSample = 0;
         SetUpScene();
     }
 
     private void OnDisable()
     {
-        if (_sphereBuffer != null)
-            _sphereBuffer.Release();
+        if (sphereBuffer != null)
+            sphereBuffer.Release();
+    }
+
+    private void OnRenderImage(RenderTexture source, RenderTexture destination)
+    {
+        SetComputeShaderParameters();
+        Render(destination);
     }
 
     private void Update()
     {
         VisualizeRays();
 
-        if (_camera.fieldOfView != _lastFieldOfView)
+        if (mainCamera.fieldOfView != lastFieldOfView)
         {
-            _currentSample = 0;
-            _lastFieldOfView = _camera.fieldOfView;
+            currentSample = 0;
+            lastFieldOfView = mainCamera.fieldOfView;
         }
 
-        foreach (Transform t in _transformsToWatch)
+        // Rebuild scene when 'chanceOfBeingMetalSphere' changes
+        if (!Mathf.Approximately(chanceOfBeingMetalSphere, lastChanceOfBeingMetalSphere))
+        {
+            lastChanceOfBeingMetalSphere = chanceOfBeingMetalSphere;
+            currentSample = 0;
+            SetUpScene();
+        }
+
+        foreach (Transform t in trackedTransforms)
         {
             if (t.hasChanged)
             {
-                _currentSample = 0;
+                currentSample = 0;
                 t.hasChanged = false;
             }
         }
@@ -82,14 +92,12 @@ public class RayTracingMaster : MonoBehaviour
         int width = Screen.width;
         int height = Screen.height;
 
-        for (int x = 0; x < width; x += 100) // Increment by 10 for performance
+        for (int x = 0; x < width; x += 100)
         {
             for (int y = 0; y < height; y += 100)
             {
                 Vector2 uv = new Vector2((float)x / width, (float)y / height);
-                Ray ray = _camera.ViewportPointToRay(uv);
-
-                // Visualize the ray (set distance and color as needed)
+                Ray ray = mainCamera.ViewportPointToRay(uv);
                 Debug.DrawRay(ray.origin, ray.direction * 100, Color.red);
             }
         }
@@ -98,107 +106,118 @@ public class RayTracingMaster : MonoBehaviour
     private void SetUpScene()
     {
         List<Sphere> spheres = new List<Sphere>();
+        const int MAX_RETRIES = 10;
 
-        // Add a number of random spheres
         for (int i = 0; i < SpheresMax; i++)
         {
-            Sphere sphere = new Sphere();
+            int retries = 0;
+            Sphere sphere;
 
-            // Radius and radius
+        RetryPlacement:
+            sphere = new Sphere();
             sphere.radius = SphereRadius.x + Random.value * (SphereRadius.y - SphereRadius.x);
+
             Vector2 randomPos = Random.insideUnitCircle * SpherePlacementRadius;
             sphere.position = new Vector3(randomPos.x, sphere.radius, randomPos.y);
 
-            // Reject spheres that are intersecting others
+            // Check overlap
             foreach (Sphere other in spheres)
             {
                 float minDist = sphere.radius + other.radius;
                 if (Vector3.SqrMagnitude(sphere.position - other.position) < minDist * minDist)
-                    goto SkipSphere;
+                {
+                    if (retries++ < MAX_RETRIES)
+                        goto RetryPlacement; // try again
+                    else
+                        goto SkipSphere; // give up on this one
+                }
             }
 
-            // Albedo and specular color
+            // Assign material
             Color color = Random.ColorHSV();
-            bool metal = Random.value < 0.5f; // metal represents specular surface property            
-            sphere.albedo = metal ? Vector4.zero : new Vector4(color.r, color.g, color.b);
-            sphere.specular = metal ? new Vector4(color.r, color.g, color.b) : new Vector4(0.1f, 0.1f, 0.1f);
+            bool metal = Random.value > (1 - chanceOfBeingMetalSphere);
 
-            // Add the sphere to the list
+            if (!metal)
+            {
+                // Non-metals (dielectrics)
+                sphere.albedo = new Vector3(color.r, color.g, color.b);  // Kd
+                sphere.specular = new Vector3(0.04f, 0.04f, 0.04f); // small Ks as real dielectric surfaces reflect about 4% of incoming white light
+            }
+            else
+            {   // Metals
+                sphere.albedo = new Vector3(0, 0, 0); // Kd = 0
+                sphere.specular = new Vector3(color.r, color.g, color.b); // colored Ks
+            }
+
             spheres.Add(sphere);
+            continue;
 
         SkipSphere:
             continue;
         }
 
-        // Assign to compute buffer
-        if (_sphereBuffer != null)
-            _sphereBuffer.Release();
+        // upload to GPU
+        if (sphereBuffer != null)
+            sphereBuffer.Release();
+
         if (spheres.Count > 0)
         {
-            _sphereBuffer = new ComputeBuffer(spheres.Count, 40);
-            _sphereBuffer.SetData(spheres);
+            sphereBuffer = new ComputeBuffer(spheres.Count, 40); // each sphere occupies 40 bytes in GPU memory
+            sphereBuffer.SetData(spheres);
         }
     }
 
-    private void SetShaderParameters()
+
+    private void SetComputeShaderParameters()
     {
-        RayTracingShader.SetTexture(0, "_SkyboxTexture", SkyboxTexture);
-        RayTracingShader.SetMatrix("_CameraToWorld", _camera.cameraToWorldMatrix);
-        RayTracingShader.SetMatrix("_CameraInverseProjection", _camera.projectionMatrix.inverse);
-        RayTracingShader.SetVector("_PixelOffset", new Vector2(Random.value, Random.value));
+        RayTracingShader.SetTexture(0, "SkyboxTexture", SkyboxTexture);
+        RayTracingShader.SetMatrix("CameraToWorld", mainCamera.cameraToWorldMatrix);
+        RayTracingShader.SetMatrix("CameraInverseProjection", mainCamera.projectionMatrix.inverse);
+        RayTracingShader.SetVector("PixelOffset", new Vector2(Random.value, Random.value));
 
-        Vector3 l = DirectionalLight.transform.forward; // Incoming light direction
-        RayTracingShader.SetVector("_DirectionalLight", new Vector4(l.x, l.y, l.z, DirectionalLight.intensity));
+        Vector3 l = DirectionalLight.transform.forward; // incoming light direction
+        RayTracingShader.SetVector("DirectionalLight", new Vector4(l.x, l.y, l.z, DirectionalLight.intensity));
 
-        if (_sphereBuffer != null)
-            RayTracingShader.SetBuffer(0, "_Spheres", _sphereBuffer);
+        if (sphereBuffer != null)
+            RayTracingShader.SetBuffer(0, "SpheresBuffer", sphereBuffer);
     }
 
-    // When the screen size changes (like resizing the game window), 
-    // InitRenderTexture() ensures that the textures used for rendering the scene are updated to match the new size.
-    private void InitRenderTexture()
-    {
-        if (_target == null || _target.width != Screen.width || _target.height != Screen.height)
-        {
-            // Release render texture if we already have one
-            if (_target != null)
-                _target.Release();
 
-            // Get a render target for Ray Tracing
-            _target = new RenderTexture(Screen.width, Screen.height, 0, RenderTextureFormat.ARGBFloat, RenderTextureReadWrite.Linear);
-            _target.enableRandomWrite = true;
-            _target.Create();
-
-            // Reset sampling
-            _currentSample = 0;
-        }
-    }
-
-    //This process progressively renders the scene using raytracing, 
-    //refining the result with each frame by accumulating the results, which reduces noise and improves image quality.
     private void Render(RenderTexture destination)
     {
-        // Make sure we have a current render target
         InitRenderTexture();
 
         // Set the target and dispatch the compute shader
-        RayTracingShader.SetTexture(0, "Result", _target);
+        RayTracingShader.SetTexture(0, "Result", targetRT);
         int threadGroupsX = Mathf.CeilToInt(Screen.width / 8.0f);
         int threadGroupsY = Mathf.CeilToInt(Screen.height / 8.0f);
-        RayTracingShader.Dispatch(0, threadGroupsX, threadGroupsY, 1);        
+        RayTracingShader.Dispatch(0, threadGroupsX, threadGroupsY, 1);
 
         // Blit the result texture to the screen
-        if (_addMaterial == null)
-            _addMaterial = new Material(Shader.Find("Hidden/AddShader"));
-        _addMaterial.SetFloat("_Sample", _currentSample);
-        Graphics.Blit(_target, destination, _addMaterial);
+        if (addMaterial == null)
+            addMaterial = new Material(Shader.Find("Hidden/AddShader"));
+        addMaterial.SetFloat("sample", currentSample);
 
-        _currentSample++;
+        Graphics.Blit(targetRT, destination, addMaterial);
+
+        currentSample++;
     }
 
-    private void OnRenderImage(RenderTexture source, RenderTexture destination)
+
+    private void InitRenderTexture()
     {
-        SetShaderParameters();
-        Render(destination);
+        if (targetRT == null || targetRT.width != Screen.width || targetRT.height != Screen.height)
+        {
+            // Release render texture if we already have one
+            if (targetRT != null)
+                targetRT.Release();
+
+            // Get a render target for Ray Tracing
+            targetRT = new RenderTexture(Screen.width, Screen.height, 0, RenderTextureFormat.ARGBFloat, RenderTextureReadWrite.Linear);
+            targetRT.enableRandomWrite = true;
+            targetRT.Create();
+
+            currentSample = 0; // reset sampling
+        }
     }
 }

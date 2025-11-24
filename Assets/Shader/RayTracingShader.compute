@@ -1,33 +1,15 @@
-// Each #kernel tells which function to compile; you can have many kernels.
-
-/*
-
-Why You See Sphere Reflections: 
-The reflections of other spheres you're seeing are not from the direct color contribution of sphere hits (since they return black), 
-but rather from the cumulative effect of the ray's journey, reflecting off multiple spheres before finally hitting the skybox. Each reflection alters the ray's path, 
-and when it eventually hits the skybox, the color sampled is based on the final direction of the ray, which has been influenced by all the previous reflections.
-
-Direct vs. Indirect Contribution: 
-The reflections of spheres are indirect contributions. The spheres do not directly add color to the ray at the point of hit, 
-but they influence the ray's path, which eventually determines the color sampled from the skybox. 
-
-In essence, the color of each pixel in your rendered image is a result of the entire path a ray takes through the scene, 
-including all reflections and their cumulative influence on the ray's direction, leading to the final color contribution from the skybox.
-
-*/
 
 #pragma kernel CSMain
+#include "UnityCG.cginc"
 
-RWTexture2D<float4> Result; // This is a writable texture to store the final rendered image.
+RWTexture2D<float4> Result; // writable texture to store the final rendered image.
 
-float4x4 _CameraToWorld;
-float4x4 _CameraInverseProjection;
+float4x4 CameraToWorld;
+float4x4 CameraInverseProjection;
+float4 DirectionalLight;
+float2 PixelOffset;
 
-float4 _DirectionalLight;
-
-float2 _PixelOffset;
-
-Texture2D<float4> _SkyboxTexture;
+Texture2D<float4> SkyboxTexture;
 SamplerState sampler_SkyboxTexture;
 static const float PI = 3.14159265f;
 
@@ -35,17 +17,17 @@ struct Sphere
 {
     float3 position;
     float radius;
-    float3 albedo; // Diffuse property
-    float3 specular; // Reflective property
+    float3 albedo;
+    float3 specular;
 };
 
-StructuredBuffer<Sphere> _Spheres;
+StructuredBuffer<Sphere> SpheresBuffer;
 
 struct Ray
 {
     float3 origin;
-    float3 direction;  
-    float3 energy;  
+    float3 direction;
+    float3 energy;
 };
 
 struct RayHit
@@ -68,65 +50,97 @@ Ray CreateRay(float3 origin, float3 direction)
 
 Ray CreateCameraRay(float2 uv)
 {
-    // Transform the camera origin to world space
-    float3 origin = mul(_CameraToWorld, float4(0.0f, 0.0f, 0.0f, 1.0f)).xyz;
-    
-    // Converting a 2D point on the screen (uv) back into 3D space
-    float3 direction = mul(_CameraInverseProjection, float4(uv, 0.0f, 1.0f)).xyz;
+    // Camera origin in world space
+    float3 origin = mul(CameraToWorld, float4(0, 0, 0, 1)).xyz;
 
-    // Transform the direction from camera to world space and normalize
-    direction = mul(_CameraToWorld, float4(direction, 0.0f)).xyz;
+    // Unproject from NDC → view space
+    float4 pos = mul(CameraInverseProjection, float4(uv, 1.0f, 1.0f));
+    pos /= pos.w; // perspective divide
+    float3 viewDir = normalize(pos.xyz); // direction in view space
+
+    // Convert to world space
+    float3 direction = mul(CameraToWorld, float4(viewDir, 0)).xyz;
     direction = normalize(direction);
 
     return CreateRay(origin, direction);
 }
 
+
 RayHit CreateRayHit()
 {
     RayHit hit;
+
     hit.position = float3(0.0f, 0.0f, 0.0f);
     hit.distance = 1.#INF;
     hit.normal = float3(0.0f, 0.0f, 0.0f);
     hit.albedo = float3(0.0f, 0.0f, 0.0f);
     hit.specular = float3(0.0f, 0.0f, 0.0f);
+
     return hit;
 }
 
 
 void IntersectGroundPlane(Ray ray, inout RayHit bestHit)
 {
-    // Calculate distance along the ray where the ground plane is intersected
-    float t = -ray.origin.y / ray.direction.y; // This ground plane is aligned with XZ plane
+    float denom = ray.direction.y;
+
+    // 1. Only intersect if ray is pointing downward
+    // 2. Avoid division by zero and near-zero
+
+    if (denom >= - 0.0001) // if ray is not pointing down enough
+    return;
+
+    float t = - ray.origin.y / denom; // ground plane is aligned with XZ plane passing through the origin
+
     if (t > 0 && t < bestHit.distance)
     {
         bestHit.distance = t;
         bestHit.position = ray.origin + t * ray.direction;
-        bestHit.normal = float3(0.0f, 1.0f, 0.0f);
-        bestHit.albedo = 0.8f;
-        bestHit.specular = 0.2f;
+        bestHit.normal = float3(0.0f, 1.0f, 0.0f); // plane normal is along the Y direction
+
+        // The ground plane is a diffuse surface
+        bestHit.albedo = float3(0.8f, 0.8f, 0.8f);
+        bestHit.specular = float3(0.04f, 0.04f, 0.04f);
     }
 }
 
+
 void IntersectSphere(Ray ray, inout RayHit bestHit, uint sphereIndex)
 {
-    // Calculate distance along the ray where the sphere is intersected
-    Sphere sphere = _Spheres[sphereIndex];
-    float3 d = ray.origin - sphere.position;
-    float p1 = -dot(ray.direction, d);
-    float p2sqr = p1 * p1 - dot(d, d) + sphere.radius * sphere.radius;
-    if (p2sqr < 0)
-        return;
-    float p2 = sqrt(p2sqr);
-    float t = p1 - p2 > 0 ? p1 - p2 : p1 + p2;
-    if (t > 0 && t < bestHit.distance)
-    {
-        bestHit.distance = t;
-        bestHit.position = ray.origin + t * ray.direction;
-        bestHit.normal = normalize(bestHit.position - sphere.position);
-        bestHit.albedo = sphere.albedo;
-        bestHit.specular = sphere.specular;
-    }
+    Sphere sphere = SpheresBuffer[sphereIndex];
+
+
+    float3 d = ray.origin - sphere.position; // vector from sphere center to ray origin
+
+    // Quadratic coefficients for: t² + bt + c = 0
+    float a = 1.0f;
+    float b = 2.0f * dot(ray.direction, d);
+    float c = dot(d, d) - sphere.radius * sphere.radius;
+
+    float discriminant = b * b - 4.0f * a * c;
+    if (discriminant < 0.0f)
+    return; // no intersection
+
+    float sqrtDisc = sqrt(discriminant);
+
+    // Find two roots
+    float t1 = (- b - sqrtDisc) * 0.5f; // divided by 2a = 2
+    float t2 = (- b + sqrtDisc) * 0.5f;
+
+    // Pick nearest positive root
+    float t = (t1 > 0.0f) ? t1 : t2;
+    if (t <= 0.0f || t >= bestHit.distance)
+    return;
+
+    // Update closest hit
+    bestHit.distance = t;
+    bestHit.position = ray.origin + t * ray.direction;
+    bestHit.normal = normalize(bestHit.position - sphere.position);
+    bestHit.albedo = sphere.albedo;
+    bestHit.specular = sphere.specular;
 }
+
+
 
 RayHit Trace(Ray ray)
 {
@@ -137,73 +151,113 @@ RayHit Trace(Ray ray)
 
     // Trace spheres
     uint numSpheres, stride;
-    _Spheres.GetDimensions(numSpheres, stride);
+    SpheresBuffer.GetDimensions(numSpheres, stride);
 
-    for (uint i = 0; i < numSpheres; i++)
-        IntersectSphere(ray, bestHit, i);
+    for (uint i = 0; i < numSpheres; i ++)
+    IntersectSphere(ray, bestHit, i);
 
     return bestHit;
 }
 
+
 float3 Shade(inout Ray ray, RayHit hit)
 {
-    if (hit.distance < 1.#INF)
-    { 
-        // Reflect the ray and multiply energy with specular component
-        ray.origin = hit.position + hit.normal * 0.001f;
-        ray.direction = reflect(ray.direction, hit.normal);
-        ray.energy *= hit.specular; // returns a vector3
+    // Case I: SkyBox
+    if (hit.distance == 1.#INF)
+    {
+        ray.energy = 0.0f;
 
-        // Shadow test ray
-        bool shadow = false;
-        Ray shadowRay = CreateRay(hit.position + hit.normal * 0.001f, -1 * _DirectionalLight.xyz);
+        float3 dir = normalize(ray.direction);
+
+        // longitude
+        float phi = atan2(dir.z, dir.x);
+        phi = (phi + PI) / (2.0f * PI);
+
+        // latitude
+        float theta = acos(dir.y) / PI;
+        theta = 1 - theta;
+
+        float2 skyUV = float2(phi, theta);
+        float3 sky = SkyboxTexture.SampleLevel(sampler_SkyboxTexture, skyUV, 0).xyz;
+
+        float skyboxIntensityFactor = 1.36f;
+        return sky * skyboxIntensityFactor;
+    }
+
+    bool isMetal = (hit.albedo.x == 0 && hit.albedo.y == 0 && hit.albedo.z == 0);
+
+    float3 L = normalize(- DirectionalLight.xyz);
+    float NdotL = saturate(dot(hit.normal, L));
+
+    float3 surfaceLight = float3(0, 0, 0);
+
+    // Case II: Non-Metal (dielectrics)
+    if (! isMetal)
+    {
+        // Diffuse + specular shading (Blinn–Phong)
+        float3 diffuse = hit.albedo * DirectionalLight.w * NdotL;
+        float3 V = - ray.direction;
+        float3 H = normalize(L + V);
+        float3 specular = hit.specular * pow(saturate(dot(hit.normal, H)), 32.0f);
+
+        // Shadow test
+        Ray shadowRay = CreateRay(hit.position + hit.normal * 0.001f, L);
         RayHit shadowHit = Trace(shadowRay);
+
         if (shadowHit.distance != 1.#INF)
         {
-            return float3(0.0f, 0.0f, 0.0f);
+            diffuse = float3(0, 0, 0); // in shadow
         }
 
-        // Return a diffuse-shaded color        
-        return saturate(dot(hit.normal, _DirectionalLight.xyz) * -1) * _DirectionalLight.w * hit.albedo; // It returns a Vector3
-        //return saturate(dot(hit.normal, -1 * _DirectionalLight.xyz)) * _DirectionalLight.w * hit.albedo;
+        surfaceLight = diffuse + specular;
+
+        // Stop further ray bounces for diffuse surfaces
+        ray.energy = 0;
+        return surfaceLight;
     }
+
+    // Case III: Metal (pure mirror reflection)
     else
     {
-        // Erase the ray's energy - the sky doesn't reflect anything
-        ray.energy = 0.0f;
-        // Sample the skybox and write it
-        float theta = acos(ray.direction.y) / -PI; // Measure angle between ray direction and y-axis
-        float phi = atan2(ray.direction.x, -ray.direction.z) / -PI * 0.5f; // Measuring the angle from the positive x-axis to the projected vector direction on xz plane 
-        
-        float skyboxIntensityFactor = 1.36f; // Example value, adjust as needed
-        float3 skyboxColor = _SkyboxTexture.SampleLevel(sampler_SkyboxTexture, float2(phi, theta), 0).xyz; // Get the color from the texture based on the phi and theta coordinates. The 0 indicates no mipmaps.
-        return skyboxColor * skyboxIntensityFactor;
+        surfaceLight = float3(0, 0, 0); // no diffuse light contribution
+
+        // Perfect specular reflection
+        ray.origin = hit.position + hit.normal * 0.001f;
+        ray.direction = reflect(ray.direction, hit.normal);
+        ray.energy *= hit.specular; // throughput update
+
+        return surfaceLight;
     }
 }
 
 [numthreads(8,8,1)]
-void CSMain (uint3 id : SV_DispatchThreadID)
+void CSMain(uint3 id : SV_DispatchThreadID)
 {
-    // Get the dimensions of the RenderTexture
     uint width, height;
     Result.GetDimensions(width, height);
 
-    // Transform pixel to [-1,1] range for DirectX used by Unity
-    float2 uv = float2((id.xy + _PixelOffset) / float2(width, height) * 2.0f - 1.0f);
+    // Convert pixel coordinates to normalized device coordinates [-1, 1]
+    float2 uv = (id.xy + PixelOffset) / float2(width, height) * 2.0f - 1.0f;
 
-    // Get a ray for the UVs
-    Ray ray = CreateCameraRay(uv); 
+    // Generate a primary ray from the camera through this pixel
+    Ray ray = CreateCameraRay(uv);
 
-    // Trace and shade the ray
-    float3 result = float3(0, 0, 0);
-    for (int i = 0; i < 10; i++)
+    float3 shadedColor = float3(0, 0, 0);
+
+    // Trace multiple bounces (for reflections)
+    for (int bounce = 0; bounce < 10; bounce ++)
     {
-        RayHit hit = Trace(ray);        
-        result += ray.energy * Shade(ray, hit); // Here, we are considering energy of the incident ray
+        float3 incidentRayEnergy = ray.energy; // current light intensity carried by the ray
 
-        if (!any(ray.energy))
-            break;
+        RayHit hit = Trace(ray); // find intersection with the scene
+
+        float3 reflectedRadiance = Shade(ray, hit); // light reflected / emitted from the surface toward the camera
+        shadedColor += incidentRayEnergy * reflectedRadiance; // accumulate final pixel color
+
+        if (! any(ray.energy)) // stop when the ray no longer carries light
+        break;
     }
 
-    Result[id.xy] = float4(result, 1); 
+    // Store final pixel color
+    Result[id.xy] = float4(shadedColor, 1);
 }
