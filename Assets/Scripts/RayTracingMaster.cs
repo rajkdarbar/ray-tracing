@@ -20,9 +20,13 @@ public class RayTracingMaster : MonoBehaviour
 
     private Camera mainCamera;
     private float lastFieldOfView;
+
     private RenderTexture targetRT;
-    private Material addMaterial;
+    private RenderTexture convergedRT;
+
     private uint currentSample = 0;
+    private Material accumulationMaterial;
+
     private ComputeBuffer sphereBuffer;
     private List<Transform> trackedTransforms = new List<Transform>();
 
@@ -61,7 +65,7 @@ public class RayTracingMaster : MonoBehaviour
 
     private void Update()
     {
-        VisualizeRays();
+        // VisualizeRays();
 
         if (mainCamera.fieldOfView != lastFieldOfView)
         {
@@ -139,12 +143,12 @@ public class RayTracingMaster : MonoBehaviour
 
             if (!metal)
             {
-                // Non-metals (dielectrics)
+                // DIFFUSE (Lambertian) — rough, matte
                 sphere.albedo = new Vector3(color.r, color.g, color.b);  // Kd
                 sphere.specular = new Vector3(0.04f, 0.04f, 0.04f); // small Ks as real dielectric surfaces reflect about 4% of incoming white light
             }
             else
-            {   // Metals
+            {   // GLOSSY METALLIC — shiny metal, color-tinted reflections
                 sphere.albedo = new Vector3(0, 0, 0); // Kd = 0
                 sphere.specular = new Vector3(color.r, color.g, color.b); // colored Ks
             }
@@ -162,7 +166,8 @@ public class RayTracingMaster : MonoBehaviour
 
         if (spheres.Count > 0)
         {
-            sphereBuffer = new ComputeBuffer(spheres.Count, 40); // each sphere occupies 40 bytes in GPU memory
+            const int SphereStride = sizeof(float) * (3 + 1 + 3 + 3); // each sphere occupies 40 bytes in GPU memory
+            sphereBuffer = new ComputeBuffer(spheres.Count, SphereStride);
             sphereBuffer.SetData(spheres);
         }
     }
@@ -189,16 +194,24 @@ public class RayTracingMaster : MonoBehaviour
 
         // Set the target and dispatch the compute shader
         RayTracingShader.SetTexture(0, "Result", targetRT);
+
         int threadGroupsX = Mathf.CeilToInt(Screen.width / 8.0f);
         int threadGroupsY = Mathf.CeilToInt(Screen.height / 8.0f);
         RayTracingShader.Dispatch(0, threadGroupsX, threadGroupsY, 1);
 
-        // Blit the result texture to the screen
-        if (addMaterial == null)
-            addMaterial = new Material(Shader.Find("Hidden/AddShader"));
-        addMaterial.SetFloat("sample", currentSample);
+        if (accumulationMaterial == null)
+            accumulationMaterial = new Material(Shader.Find("Hidden/AccumulateSamples"));
 
-        Graphics.Blit(targetRT, destination, addMaterial);
+        RenderTexture tempRT = RenderTexture.GetTemporary(convergedRT.width, convergedRT.height, 0, RenderTextureFormat.ARGBFloat);
+
+        accumulationMaterial.SetTexture("_MainTex", targetRT); // new sample
+        accumulationMaterial.SetTexture("_History", convergedRT); // previous frame
+        accumulationMaterial.SetFloat("_Sample", currentSample);
+
+        Graphics.Blit(null, tempRT, accumulationMaterial); // run accumulation shader → store result in tempRT
+        Graphics.Blit(tempRT, convergedRT); // copy accumulated result into convergedRT (persistent buffer)
+        Graphics.Blit(convergedRT, destination); // output converged image to the screen (framebuffer)
+        RenderTexture.ReleaseTemporary(tempRT); // release temporary render texture memory
 
         currentSample++;
     }
@@ -208,16 +221,25 @@ public class RayTracingMaster : MonoBehaviour
     {
         if (targetRT == null || targetRT.width != Screen.width || targetRT.height != Screen.height)
         {
-            // Release render texture if we already have one
             if (targetRT != null)
+            {
                 targetRT.Release();
+            }
 
-            // Get a render target for Ray Tracing
+            if (convergedRT != null)
+            {
+                convergedRT.Release();
+            }
+
             targetRT = new RenderTexture(Screen.width, Screen.height, 0, RenderTextureFormat.ARGBFloat, RenderTextureReadWrite.Linear);
             targetRT.enableRandomWrite = true;
             targetRT.Create();
 
-            currentSample = 0; // reset sampling
+            convergedRT = new RenderTexture(Screen.width, Screen.height, 0, RenderTextureFormat.ARGBFloat, RenderTextureReadWrite.Linear);
+            convergedRT.enableRandomWrite = true;
+            convergedRT.Create();
+
+            currentSample = 0;
         }
     }
 }

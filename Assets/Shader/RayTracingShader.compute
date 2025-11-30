@@ -1,4 +1,3 @@
-
 #pragma kernel CSMain
 #include "UnityCG.cginc"
 
@@ -109,7 +108,6 @@ void IntersectSphere(Ray ray, inout RayHit bestHit, uint sphereIndex)
 {
     Sphere sphere = SpheresBuffer[sphereIndex];
 
-
     float3 d = ray.origin - sphere.position; // vector from sphere center to ray origin
 
     // Quadratic coefficients for: t² + bt + c = 0
@@ -139,8 +137,6 @@ void IntersectSphere(Ray ray, inout RayHit bestHit, uint sphereIndex)
     bestHit.albedo = sphere.albedo;
     bestHit.specular = sphere.specular;
 }
-
-
 
 RayHit Trace(Ray ray)
 {
@@ -186,49 +182,41 @@ float3 Shade(inout Ray ray, RayHit hit)
 
     bool isMetal = (hit.albedo.x == 0 && hit.albedo.y == 0 && hit.albedo.z == 0);
 
-    float3 L = normalize(- DirectionalLight.xyz);
-    float NdotL = saturate(dot(hit.normal, L));
-
-    float3 surfaceLight = float3(0, 0, 0);
-
-    // Case II: Non-Metal (dielectrics)
+    // Case II: DIFFUSE Spheres — rough, matte
     if (! isMetal)
     {
-        // Diffuse + specular shading (Blinn–Phong)
+        float3 L = normalize(- DirectionalLight.xyz);
+
+        // Shadow test first
+        Ray shadowRay = CreateRay(hit.position + hit.normal * 0.005f, L);
+        RayHit shadowHit = Trace(shadowRay);
+
+        if (shadowHit.distance != 1.#INF)
+        return float3(0, 0, 0); // fully shadowed — light blocked by another object
+
+        // Lighting only if visible (Lambert + Blinn–Phong)
+        float NdotL = saturate(dot(hit.normal, L));
         float3 diffuse = hit.albedo * DirectionalLight.w * NdotL;
         float3 V = - ray.direction;
         float3 H = normalize(L + V);
         float3 specular = hit.specular * pow(saturate(dot(hit.normal, H)), 32.0f);
 
-        // Shadow test
-        Ray shadowRay = CreateRay(hit.position + hit.normal * 0.001f, L);
-        RayHit shadowHit = Trace(shadowRay);
+        ray.energy = 0; // stop further ray bounces for diffuse surfaces
 
-        if (shadowHit.distance != 1.#INF)
-        {
-            diffuse = float3(0, 0, 0); // in shadow
-        }
-
-        surfaceLight = diffuse + specular;
-
-        // Stop further ray bounces for diffuse surfaces
-        ray.energy = 0;
-        return surfaceLight;
+        return diffuse + specular;
     }
 
-    // Case III: Metal (pure mirror reflection)
+    // Case III: GLOSSY METALLIC — perfect specular reflection
     else
     {
-        surfaceLight = float3(0, 0, 0); // no diffuse light contribution
-
-        // Perfect specular reflection
-        ray.origin = hit.position + hit.normal * 0.001f;
+        ray.origin = hit.position + hit.normal * 0.005f;
         ray.direction = reflect(ray.direction, hit.normal);
-        ray.energy *= hit.specular; // throughput update
+        ray.energy *= hit.specular; // throughput update for reflective material
 
-        return surfaceLight;
+        return float3(0, 0, 0);
     }
 }
+
 
 [numthreads(8,8,1)]
 void CSMain(uint3 id : SV_DispatchThreadID)
