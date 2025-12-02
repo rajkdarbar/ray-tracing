@@ -156,6 +156,45 @@ RayHit Trace(Ray ray)
 }
 
 
+bool TraceShadowRay(Ray ray)
+{
+    // Check ground plane
+    float denom = ray.direction.y;
+    if (denom < - 0.0001)
+    {
+        float t = - ray.origin.y / denom;
+        if (t > 0.0f)
+        return true; // hit ground
+    }
+
+    // Check all spheres
+    uint numSpheres, stride;
+    SpheresBuffer.GetDimensions(numSpheres, stride);
+
+    for (uint i = 0; i < numSpheres; i ++)
+    {
+        Sphere sphere = SpheresBuffer[i];
+        float3 d = ray.origin - sphere.position;
+        float b = 2.0f * dot(ray.direction, d);
+        float c = dot(d, d) - sphere.radius * sphere.radius;
+        float discriminant = b * b - 4.0f * c;
+
+        if (discriminant >= 0.0f)
+        {
+            float sqrtDisc = sqrt(discriminant);
+            float t1 = (- b - sqrtDisc) * 0.5f;
+            float t2 = (- b + sqrtDisc) * 0.5f;
+
+            if (t1 > 0.0f || t2 > 0.0f)
+            return true; // any intersection blocks the light
+        }
+    }
+
+    return false; // clear line of sight
+}
+
+
+
 float3 Shade(inout Ray ray, RayHit hit)
 {
     // Case I: SkyBox
@@ -189,9 +228,8 @@ float3 Shade(inout Ray ray, RayHit hit)
 
         // Shadow test first
         Ray shadowRay = CreateRay(hit.position + hit.normal * 0.005f, L);
-        RayHit shadowHit = Trace(shadowRay);
-
-        if (shadowHit.distance != 1.#INF)
+        bool inShadow = TraceShadowRay(shadowRay);
+        if (inShadow)
         return float3(0, 0, 0); // fully shadowed — light blocked by another object
 
         // Lighting only if visible (Lambert + Blinn–Phong)
