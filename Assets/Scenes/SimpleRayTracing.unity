@@ -324,7 +324,7 @@ MonoBehaviour:
   RayTracingShader: {fileID: 7200000, guid: aa2b259c7d4848449b05261a89da1f55, type: 3}
   SkyboxTexture: {fileID: 2800000, guid: 07dcf263da373af419112a9d22ffdcf7, type: 3}
   DirectionalLight: {fileID: 705507994}
-  chanceOfBeingMetalSphere: 0.583
+  chanceOfBeingMetalSphere: 0.005
   SphereRadius: {x: 5, y: 25}
   SpheresMax: 300
   SpherePlacementRadius: 100

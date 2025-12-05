@@ -98,7 +98,7 @@ void IntersectGroundPlane(Ray ray, inout RayHit bestHit)
         bestHit.normal = float3(0.0f, 1.0f, 0.0f); // plane normal is along the Y direction
 
         // The ground plane is a diffuse surface
-        bestHit.albedo = float3(0.8f, 0.8f, 0.8f);
+        bestHit.albedo = float3(0.843f, 0.722f, 0.651f);
         bestHit.specular = float3(0.04f, 0.04f, 0.04f);
     }
 }
