@@ -35,7 +35,7 @@ The goal was to learn the fundamentals of ray tracing from scratch — generatin
 
 ## 🎥 Demo Video
 
-Real-time capture running on an **NVIDIA GeForce RTX 3070 Laptop GPU** — [Watch the video](https://youtu.be/Ldk_A19vR78)
+Real-time capture running on an **NVIDIA GeForce RTX 3070 Laptop GPU** — [Watch the video](https://youtu.be/Lt6MXKXBebE)
 
 ---
 
